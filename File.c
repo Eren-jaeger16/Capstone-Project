@@ -1,311 +1,562 @@
-/*
-Below is a detailed, step-by-step design and guidance on implementing a lightweight custom protocol on top of your existing TLS (PSK-based) 
-secure channel to exchange certificates. The approach assumes that you have already established a secure TLS tunnel using mbedtls with a PSK, 
-and now you want to send certificates (files) from one peer to the other. We will design a simple, message-based protocol, and then outline how 
-to implement it.
+/*Below are detailed suggestions and design options for evolving your current certificate exchange protocol into a more flexible, non-blocking (asynchronous) or state-machine-driven implementation. The goal is to decouple the raw I/O operations from the logic of sending/receiving certificates, provide a clear structure for the protocol state, and allow the application to integrate the file transfer smoothly into event-driven or asynchronous frameworks.
 
-High-Level Goals
+Goals
 
-Use the existing secure channel: You already have a TLS connection established using PSK. 
-Your data is therefore encrypted and authenticated, which greatly simplifies the protocol 
-design—no need to handle cryptographic concerns at this stage. Lightweight and simple: Keep
-the protocol small and straightforward. Use a simple framing format with a header that indicates:
-The type of message (e.g., request, response, certificate data, etc.)
-The length of the payload
-The payload (the actual certificate data)
-One-way or two-way exchange: Decide whether the client requests a certificate from the server,
-the server pushes a certificate to the client, or both ways. The design below assumes you want a 
-symmetric capability (both can send/receive). Extensibility: If in the future you want to send 
-different file types or multiple certificates, you can extend the protocol by defining additional 
-message types or adding a simple negotiation phase. Protocol Message Format:
+Non-blocking I/O Support: Instead of waiting (blocking) for mbedtls_ssl_read() or mbedtls_ssl_write() to complete, allow the code to return immediately if it cannot proceed, and resume when more data is available or when the network is ready for writing. This can allow integration into event loops, select()/poll()-based I/O, or asynchronous frameworks.
+State Machine for Protocol Logic: Introduce a state machine to keep track of what part of the protocol you’re in. Instead of writing a large monolithic function that waits for each message (blocking), you keep track of a current state (e.g., "EXPECTING_CERT_INFO" or "SENDING_CHUNKS") and call a step function that attempts to do whatever is needed at that moment. If the I/O is not ready, you return and later resume from the same state.
+Context Structure: Define a context structure that holds:
+The current state of the protocol exchange.
+Buffers for partial reads/writes.
+The total size of the file to send/receive.
+The amount of data already transferred.
+A file descriptor or file pointer for the certificate file.
+Possibly callback functions to notify the application when certain events occur (e.g., "transfer complete").
+With this approach, the application can:
 
-Define a simple message structure. For instance:
+Check if more data is ready to be processed (non-blocking read).
+Feed data into the state machine when it’s ready.
+Move on to other tasks without being stuck waiting for the network.
+Possible Approaches
 
-   +----------+----------+-------------------+
-   | Msg Type | Length   | Payload           |
-   | (1 byte) | (4 bytes)| (variable length) |
-   +----------+----------+-------------------+
-Msg Type: A single byte that indicates the message type. For example:
-0x01: REQUEST_CERT (Client asks the server to send its certificate)
-0x02: CERT_INFO (Response from the server with certificate metadata)
-0x03: CERT_DATA (Certificate chunk payload)
-0x04: TRANSFER_COMPLETE (Indicates that the file/certificate transfer is done)
-Length: A 4-byte (uint32_t) length field in network byte order (big-endian) indicating how many bytes of payload follow.
-Payload: Variable-length data dependent on the message type.
-For REQUEST_CERT, the payload could be empty or could contain an identifier string if multiple certificates are available.
-For CERT_INFO, the payload might include the total size of the certificate and possibly a filename or type (PEM, DER).
-For CERT_DATA, the payload is a raw chunk of the certificate file.
-For TRANSFER_COMPLETE, the payload can be empty or contain a status code.
-This simple structure makes it easy to parse and is extensible if you want to add other message types later.
-*/
+1. Fully Asynchronous with Event Loop Integration
+Concept:
 
-int send_message(mbedtls_ssl_context *ssl, uint8_t msg_type, const uint8_t *payload, uint32_t payload_len) {
-    uint8_t header[5]; // 1 byte type + 4 bytes length
-    header[0] = msg_type;
-    uint32_t net_len = htonl(payload_len);
-    memcpy(header + 1, &net_len, 4);
+You run a main event loop (e.g., select(), poll(), or epoll() on sockets) and whenever the TLS socket is readable or writable, you call a "process step" function of your state machine.
+The state machine tries to read or write what it needs and if it can’t proceed (e.g., mbedtls_ssl_read() returns MBEDTLS_ERR_SSL_WANT_READ), it just stops and returns control to the event loop.
+How to Implement:
 
-    // Write header
-    int ret = mbedtls_ssl_write(ssl, header, 5);
-    if (ret < 0) return ret;
+Context Structure (transfer_context_t):*/
+typedef enum {
+    STATE_IDLE,
+    STATE_REQUEST_SENT,
+    STATE_WAITING_CERT_INFO,
+    STATE_RECEIVING_DATA,
+    STATE_TRANSFER_COMPLETE,
+    STATE_SENDING_INFO,
+    STATE_SENDING_DATA
+    // ... Add more states if needed
+} transfer_state_t;
 
-    // Write payload if any
-    if (payload_len > 0) {
-        ret = mbedtls_ssl_write(ssl, payload, payload_len);
-        if (ret < 0) return ret;
+typedef struct {
+    mbedtls_ssl_context *ssl;
+    transfer_state_t state;
+    FILE *file;
+    uint32_t total_size;
+    uint32_t bytes_transferred;
+    uint8_t msg_type;
+    uint8_t header[5]; 
+    size_t header_bytes_read;  // how many bytes of header have we read/written so far
+    size_t payload_bytes_read; // how many bytes of payload read/written so far
+    uint32_t payload_length;
+    uint8_t *payload_buffer;
+    size_t payload_buffer_size;
+    // You might also store callbacks or user data here
+} transfer_context_t;
+/*Non-blocking I/O Considerations: With mbedtls, you can use a non-blocking socket underneath. Typically, you set the underlying BIO (callback for send/recv) to return MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE when the operation would block. Your state machine functions then detect these return values and simply return to the caller, which will later retry.
+Step Function: Create a function like int transfer_step(transfer_context_t *ctx) that:
+Looks at ctx->state.
+Based on the state, tries to perform the next action (e.g., read the next message header, read payload, write next chunk of data).
+If mbedtls_ssl_read() or mbedtls_ssl_write() returns a "want read/write" error, just return to the event loop. The state machine remains in the same state. Next time the socket is ready, you call transfer_step() again.
+When a state transition condition is met (e.g., finished reading CERT_INFO), move ctx->state to the next state (e.g., STATE_RECEIVING_DATA).
+If completed (e.g., all data received), set ctx->state to STATE_TRANSFER_COMPLETE.
+Advantages:
+Integrates nicely with event-driven code.
+No blocking waits; you can handle multiple connections simultaneously.
+2. Synchronous Code With Internal State Machine
+If you still want synchronous calls (e.g., a function that just "runs" the transfer and returns), you can still benefit from a state machine:
+
+The main difference is that you loop over transfer_step() until it completes, and if there's a blocking call, you handle it in a controlled manner (possibly with timeouts).
+The state machine logic is the same, but you keep calling transfer_step() in a loop until STATE_TRANSFER_COMPLETE or an error occurs.
+This makes the code cleaner and more maintainable, as the logic of what to do next is not scattered but centralized in the state machine transitions.
+3. Using Callbacks and an Event-Driven Interface
+You could design a small "framework" around your file transfer protocol:
+
+Register callbacks:*/
+on_cert_info_received(total_size)
+on_chunk_received(data, length)
+on_transfer_complete()
+on_error(error_code)
+/*Your state machine code calls these callbacks when events occur. The application is then free to handle them asynchronously (e.g., store the data in memory, write to file, notify the GUI, etc.).
+This approach naturally leads to a clean separation of concerns: the state machine knows about the protocol, while the application logic is in callbacks.
+4. Ring Buffers or Queues for Data
+If you want to avoid blocking on writes, you might use a send queue:
+
+Maintain a buffer or queue of messages (headers + payloads) that you want to send.
+The state machine tries to send whatever is at the front of the queue.
+If it can’t send everything at once (non-blocking), it remembers how far it got. Next time transfer_step() is called and the socket is writable, it continues from there.
+This approach can also be applied to reading. If mbedtls_ssl_read() only provides partial data, you store it in a buffer until you have the full header or payload, then process it. The state machine only transitions states when full messages have been accumulated.
+
+5. Integrating with Other Protocols or Multiple Certificates
+The state machine approach makes it easy to add complexity:
+
+If you need to send multiple certificates in sequence:
+Extend the state machine to handle a "send next file" state, or loop back to STATE_SENDING_INFO after completion of one transfer.
+If you need to interleave other message types (e.g., "PAUSE", "RESUME", "CANCEL"), add states or handle these messages in the message parsing step, transitioning states accordingly.
+6. Practical Steps to Implement
+Define the State Machine States and Transitions:
+For example:
+STATE_IDLE: Haven’t started anything.
+STATE_REQUEST_SENT: Client sent a request, waiting for CERT_INFO.
+STATE_WAITING_CERT_INFO: About to read CERT_INFO header and payload.
+STATE_RECEIVING_DATA: Reading CERT_DATA chunks until total_size is reached.
+STATE_TRANSFER_COMPLETE: Done.
+For the server:
+STATE_IDLE (no request yet)
+STATE_WAITING_REQUEST: reading REQUEST_CERT
+STATE_SENDING_INFO: sending CERT_INFO
+STATE_SENDING_DATA: sending all chunks
+STATE_SENDING_COMPLETE: sending TRANSFER_COMPLETE
+Write Helper Functions for Partial I/O:
+Functions like read_bytes_nonblocking(ssl, buffer, length, &bytes_read_so_far) that attempt to read exactly length bytes into buffer, updating bytes_read_so_far each call. If incomplete, return a "would block" status. If complete, return success.
+Similarly for writing: write_bytes_nonblocking(ssl, buffer, length, &bytes_written_so_far).
+Handle Headers and Payloads in Steps:
+Each message read consists of two steps: first read the 5-byte header (possibly in multiple partial reads), then read the payload. The state machine might have intermediate sub-states or just variables that track where you are (e.g., header_bytes_read < 5, etc.).
+Return Control Early:
+On MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, immediately return from transfer_step() to let the event loop handle other tasks. The next call to transfer_step() (when conditions are right) will resume from the same state and partial read/write positions.
+Example Pseudocode for a Step Function*/
+int transfer_step(transfer_context_t *ctx) {
+    int ret;
+    switch (ctx->state) {
+    case STATE_IDLE:
+        // Maybe we need to initiate a request here
+        ctx->state = STATE_REQUEST_SENT;
+        // Fall through or break, depending on logic
+        break;
+
+    case STATE_REQUEST_SENT:
+        // Waiting for CERT_INFO
+        // Try to read header
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->header, 5, &ctx->header_bytes_read);
+        if (ret == WANT_READ) {
+            return WANT_READ; // can't proceed now
+        } else if (ret < 0) {
+            return ret; // error
+        }
+        if (ctx->header_bytes_read < 5) {
+            return WANT_READ; // partial read
+        }
+
+        // Parse message type and length
+        ctx->msg_type = ctx->header[0];
+        ctx->payload_length = ntohl(*(uint32_t*)&ctx->header[1]);
+
+        // Allocate payload buffer if needed
+        if (ctx->payload_length > ctx->payload_buffer_size) {
+            free(ctx->payload_buffer);
+            ctx->payload_buffer = malloc(ctx->payload_length);
+            ctx->payload_buffer_size = ctx->payload_length;
+        }
+
+        ctx->payload_bytes_read = 0;
+        ctx->state = STATE_WAITING_CERT_INFO; // next step: read payload
+        break;
+
+    case STATE_WAITING_CERT_INFO:
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->payload_buffer, ctx->payload_length, &ctx->payload_bytes_read);
+        if (ret == WANT_READ) {
+            return WANT_READ;
+        } else if (ret < 0) {
+            return ret;
+        }
+        if (ctx->payload_bytes_read < ctx->payload_length) {
+            return WANT_READ; // still reading
+        }
+
+        // Now we have full CERT_INFO
+        // parse total size, etc.
+        ctx->total_size = ...;
+
+        ctx->bytes_transferred = 0;
+        ctx->state = STATE_RECEIVING_DATA; // ready to receive data chunks
+        break;
+
+    case STATE_RECEIVING_DATA:
+        // Similar logic: read next header, then next payload chunk
+        // When done or TRANSFER_COMPLETE received, update state
+        break;
+
+    default:
+        // Handle other states
+        break;
     }
-    return 0;
+
+    return 0; // success or still working, no error
 }
+/*This pseudocode shows that in each step, you attempt exactly what’s needed next. If you cannot complete the operation because the socket is not ready, you return a special code (like WANT_READ), and the caller can wait and call again when ready. This approach decouples the protocol logic from the actual blocking nature of I/O.
 
-/*Basic Exchange Flow
+In summary: To move from a blocking, linear implementation to a flexible, asynchronous or state-machine-driven one, you will:
 
-Assume the following scenario: The client wants to get the server’s certificate.
+Introduce a state machine with well-defined states.
+Use a context structure to hold state, buffers, and progress indicators.
+Implement partial read/write functions to handle non-blocking I/O.
+Integrate these into an event-driven loop or repeatedly call a step function until completion.
+Optionally, use callbacks or events to notify the application of progress and completion.
+This gives you a robust, extensible architecture that can handle multiple simultaneous transfers, integrate into GUIs or servers handling many clients, and cleanly handle complex protocol logic.
 
-Client Sends REQUEST_CERT:
-Type = 0x01 (REQUEST_CERT)
-Length = 0 (no payload needed if not distinguishing multiple certs)
-The client writes this message to the TLS channel.
-Server Responds with CERT_INFO:
-Type = 0x02 (CERT_INFO)
-Payload:
-First 4 bytes: total certificate size in bytes (uint32_t)
-Next N bytes: optional filename or description (not strictly required)
-The server obtains its certificate file from disk, gets its size, and sends this info to the client.
-Server Sends CERT_DATA in Chunks:
-The server reads the certificate file in fixed-size chunks (e.g., 4 KB).
-For each chunk:
-Type = 0x03 (CERT_DATA)
-Length = size_of_this_chunk (e.g., 4096 bytes)
-Payload: actual 4096 bytes of certificate data.
-The server sends multiple CERT_DATA messages until the entire certificate is sent.
-Server Sends TRANSFER_COMPLETE:
-Type = 0x04 (TRANSFER_COMPLETE)
-Length = 0
-Payload: none
-This tells the client the entire certificate is transmitted.
-Client Receives and Reconstructs:
-The client receives CERT_INFO, notes the total length.
-The client receives successive CERT_DATA chunks, writing them into a local file buffer.
-Once TRANSFER_COMPLETE is received, the client knows the file is fully transferred and can close the file handle or proceed with validation.
-For sending from client to server, just reverse the roles. The exact same message types and logic can apply.
 
-Implementation Steps in C using mbedtls
 
-Prerequisites: You have a working TLS connection (via mbedtls_ssl_write() and mbedtls_ssl_read()).
 
-1. Writing a Function to Send a Message
-*/
 
+
+You said:
+Please detail the implementation of each approach, in code along with proper explanations
+
+ChatGPT
+
+**Thought about Asynchronous & Synchronous Implementations** for a couple of seconds
+Below are detailed examples of how to refactor your current certificate-transfer protocol into more flexible architectures, both asynchronous and synchronous, using a state machine. We will provide code snippets and step-by-step explanations for each approach. You can mix and match ideas from these approaches depending on the constraints and style of your project.
+
+Important Note:
+These are conceptual reference implementations. In practice, you will need to handle error cases, integrate with your actual I/O event loops, and potentially adapt function signatures. The code is intentionally simplified to illustrate the design patterns and state machine logic, rather than being a fully tested, production-ready code drop.
+
+Common Foundations
+
+Message Types and Protocol Basics
+We start with the same message definitions and message structure as before:*/
+
+#define MSG_REQUEST_CERT        0x01
+#define MSG_CERT_INFO           0x02
+#define MSG_CERT_DATA           0x03
+#define MSG_TRANSFER_COMPLETE   0x04
+/*Each message: 1-byte type, 4-byte length (network order), followed by payload of length bytes.
+
+Non-blocking I/O Handling with mbedtls
+For non-blocking I/O, you must set up the underlying socket in non-blocking mode and configure mbedtls BIO callbacks accordingly. When mbedtls_ssl_read() or mbedtls_ssl_write() returns MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, it means you must stop and wait for the socket to become readable/writable again before continuing.
+
+You can define small helper functions for partial reads/writes:*/
+
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include <stdio.h>
-#include <arpa/inet.h> // For htonl()
+#include <arpa/inet.h>
+#include <mbedtls/ssl.h>
 
-int send_message(mbedtls_ssl_context *ssl, uint8_t msg_type, const uint8_t *payload, uint32_t payload_len) {
-    uint8_t header[5]; // 1 byte type + 4 bytes length
-    header[0] = msg_type;
-    uint32_t net_len = htonl(payload_len);
-    memcpy(header + 1, &net_len, 4);
+// Return values for our step functions:
+#define TRANSFER_OK          0
+#define TRANSFER_WANT_READ   1
+#define TRANSFER_WANT_WRITE  2
+#define TRANSFER_ERROR       -1
 
-    // Write header
-    int ret = mbedtls_ssl_write(ssl, header, 5);
-    if (ret < 0) return ret;
-
-    // Write payload if any
-    if (payload_len > 0) {
-        ret = mbedtls_ssl_write(ssl, payload, payload_len);
-        if (ret < 0) return ret;
-    }
-    return 0;
-}
-
-//This function writes a single protocol message. It sends the message type and length, then sends the payload in a separate call. You could also combine them if desired.
-
-//2. Reading a Message
-//Create a function to read a complete message from the TLS connection. This function first reads the 5-byte header, then allocates or uses a buffer to read the payload.
-
-int read_message(mbedtls_ssl_context *ssl, uint8_t *msg_type, uint8_t *buf, uint32_t buf_size, uint32_t *payload_len_out) {
-    uint8_t header[5];
-    int ret = mbedtls_ssl_read(ssl, header, 5);
-    if (ret <= 0) return ret; // handle errors or interruptions
-
-    *msg_type = header[0];
-    uint32_t net_len;
-    memcpy(&net_len, header + 1, 4);
-    uint32_t payload_len = ntohl(net_len);
-
-    if (payload_len > buf_size) {
-        // Payload too large for buffer - handle error
-        return -1;
-    }
-
-    ret = mbedtls_ssl_read(ssl, buf, payload_len);
-    if (ret <= 0) return ret; // handle errors
-
-    *payload_len_out = payload_len;
-    return 0;
-}
-//This function reads a single message into a provided buffer. In a real implementation, you might dynamically allocate the buffer or handle partial reads carefully.
-
-//3. Requesting a Certificate (Client Side)
-int request_certificate(mbedtls_ssl_context *ssl) {
-    // Send a REQUEST_CERT message (type 0x01)
-    int ret = send_message(ssl, 0x01, NULL, 0);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to send REQUEST_CERT: %d\n", ret);
-        return ret;
-    }
-
-    // Read response (CERT_INFO)
-    uint8_t msg_type;
-    uint8_t buffer[1024]; // buffer large enough to hold info
-    uint32_t payload_len;
-    ret = read_message(ssl, &msg_type, buffer, sizeof(buffer), &payload_len);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to read CERT_INFO: %d\n", ret);
-        return ret;
-    }
-
-    if (msg_type != 0x02) {
-        fprintf(stderr, "Unexpected message type %d\n", msg_type);
-        return -1;
-    }
-
-    // Extract total certificate size from CERT_INFO payload
-    if (payload_len < 4) {
-        fprintf(stderr, "CERT_INFO payload too small\n");
-        return -1;
-    }
-
-    uint32_t total_cert_size;
-    memcpy(&total_cert_size, buffer, 4);
-    total_cert_size = ntohl(total_cert_size);
-
-    // Optional: read filename if present
-    // char filename[...]; // parse as needed
-
-    // Now read CERT_DATA messages until we get the whole certificate
-    FILE *f = fopen("received_cert.der", "wb");
-    if (!f) {
-        perror("fopen");
-        return -1;
-    }
-
-    uint32_t bytes_received = 0;
-    while (bytes_received < total_cert_size) {
-        ret = read_message(ssl, &msg_type, buffer, sizeof(buffer), &payload_len);
-        if (ret < 0) {
-            fprintf(stderr, "Failed to read CERT_DATA: %d\n", ret);
-            fclose(f);
-            return ret;
-        }
-
-        if (msg_type == 0x03) { // CERT_DATA
-            fwrite(buffer, 1, payload_len, f);
-            bytes_received += payload_len;
-        } else if (msg_type == 0x04) { // TRANSFER_COMPLETE
-            // Verify we received the expected amount
-            if (bytes_received == total_cert_size) {
-                printf("Certificate transfer complete.\n");
-            } else {
-                fprintf(stderr, "TRANSFER_COMPLETE received but not all data read.\n");
-            }
-            break;
+// This function tries to read 'needed' bytes into 'buf' from SSL.
+// 'consumed' tracks how many bytes have been read so far.
+// Returns:
+// - TRANSFER_OK if complete
+// - TRANSFER_WANT_READ if need more data
+// - TRANSFER_ERROR on error
+int read_bytes_nonblocking(mbedtls_ssl_context *ssl, uint8_t *buf, size_t needed, size_t *consumed) {
+    while (*consumed < needed) {
+        int ret = mbedtls_ssl_read(ssl, buf + (*consumed), needed - (*consumed));
+        if (ret > 0) {
+            *consumed += ret;
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            return TRANSFER_WANT_READ;
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            return TRANSFER_WANT_WRITE;
         } else {
-            fprintf(stderr, "Unexpected message type %d during data reception.\n", msg_type);
-            fclose(f);
-            return -1;
+            return TRANSFER_ERROR;
         }
     }
-
-    fclose(f);
-    return 0;
+    return TRANSFER_OK;
 }
 
-//This function requests the certificate from the server and writes it to a local file. The same logic can be reversed to allow the server to request from the client.
-
-//4. Serving the Certificate (Server Side)
-
-int serve_certificate(mbedtls_ssl_context *ssl, const char *cert_path) {
-    // Wait for REQUEST_CERT
-    uint8_t msg_type;
-    uint8_t buffer[1024];
-    uint32_t payload_len;
-    int ret = read_message(ssl, &msg_type, buffer, sizeof(buffer), &payload_len);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to read request: %d\n", ret);
-        return ret;
+// Similar for writing:
+int write_bytes_nonblocking(mbedtls_ssl_context *ssl, const uint8_t *buf, size_t needed, size_t *written) {
+    while (*written < needed) {
+        int ret = mbedtls_ssl_write(ssl, buf + (*written), needed - (*written));
+        if (ret > 0) {
+            *written += ret;
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            return TRANSFER_WANT_READ;
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            return TRANSFER_WANT_WRITE;
+        } else {
+            return TRANSFER_ERROR;
+        }
     }
+    return TRANSFER_OK;
+}
+//1. Synchronous Code with an Internal State Machine
 
-    if (msg_type != 0x01) {
-        fprintf(stderr, "Expected REQUEST_CERT, got %d\n", msg_type);
-        return -1;
+//Even in a synchronous approach, using a state machine makes the code cleaner and more modular. The difference here is that we will just loop until we finish or encounter an error, and we assume blocking I/O for simplicity. If read/write can block, that’s acceptable for this scenario. You can also integrate timeouts.
+
+//State Definition
+typedef enum {
+    STATE_IDLE,
+    STATE_REQUEST_SENT,
+    STATE_WAITING_CERT_INFO,
+    STATE_RECEIVING_DATA,
+    STATE_TRANSFER_COMPLETE
+} transfer_state_t;
+
+typedef struct {
+    mbedtls_ssl_context *ssl;
+    transfer_state_t state;
+    FILE *file;
+    uint8_t header[5];
+    size_t header_bytes_read;
+    uint8_t *payload;
+    size_t payload_len;
+    size_t payload_bytes_read;
+    uint32_t total_size;
+    uint32_t bytes_received;
+    int done;
+} transfer_context_t;
+//Step Function (Synchronous)
+int transfer_step(transfer_context_t *ctx) {
+    int ret;
+    switch (ctx->state) {
+    case STATE_REQUEST_SENT:
+        // Need to read CERT_INFO header
+        if (ctx->header_bytes_read < 5) {
+            // blocking read
+            ret = mbedtls_ssl_read(ctx->ssl, ctx->header + ctx->header_bytes_read, 5 - ctx->header_bytes_read);
+            if (ret <= 0) {
+                return TRANSFER_ERROR; // handle errors
+            }
+            ctx->header_bytes_read += ret;
+            if (ctx->header_bytes_read < 5) {
+                return TRANSFER_OK; // still waiting, but blocking is allowed
+            }
+        }
+
+        // Parse CERT_INFO header
+        if (ctx->header[0] != MSG_CERT_INFO) {
+            return TRANSFER_ERROR;
+        }
+        uint32_t net_len;
+        memcpy(&net_len, ctx->header + 1, 4);
+        ctx->payload_len = ntohl(net_len);
+
+        ctx->payload = malloc(ctx->payload_len);
+        ctx->payload_bytes_read = 0;
+        ctx->state = STATE_WAITING_CERT_INFO;
+        // fall through to handle reading payload
+
+    case STATE_WAITING_CERT_INFO:
+        while (ctx->payload_bytes_read < ctx->payload_len) {
+            // blocking read
+            ret = mbedtls_ssl_read(ctx->ssl, ctx->payload + ctx->payload_bytes_read,
+                                   ctx->payload_len - ctx->payload_bytes_read);
+            if (ret <= 0) {
+                return TRANSFER_ERROR; 
+            }
+            ctx->payload_bytes_read += ret;
+        }
+
+        // Parse CERT_INFO payload
+        memcpy(&net_len, ctx->payload, 4);
+        ctx->total_size = ntohl(net_len);
+        free(ctx->payload); 
+        ctx->payload = NULL;
+
+        ctx->bytes_received = 0;
+        ctx->header_bytes_read = 0; // reset for next message
+        ctx->state = STATE_RECEIVING_DATA;
+        return TRANSFER_OK; // next call will proceed to receive data
+
+    case STATE_RECEIVING_DATA:
+        // Repeatedly read headers and payload for CERT_DATA
+        // ... blocking logic: read header, parse length, read payload chunk,
+        // write to file until TRANSFER_COMPLETE is encountered.
+        // Once done:
+        ctx->state = STATE_TRANSFER_COMPLETE;
+        ctx->done = 1;
+        return TRANSFER_OK;
+
+    default:
+        return TRANSFER_OK;
     }
+}
+Explanation:
 
-    // Open certificate file
-    FILE *f = fopen(cert_path, "rb");
-    if (!f) {
-        perror("fopen");
-        return -1;
-    }
+/*Each call to transfer_step() tries to make progress. In a synchronous model, you might call transfer_step() in a loop until ctx->done is set.
+The logic is structured by states, making the code easier to follow than a single monolithic function.
+2. Asynchronous with Event Loop Integration
 
-    fseek(f, 0, SEEK_END);
-    long cert_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+In this approach, we do not block. Instead, transfer_step() returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE when it needs more I/O. The event loop (e.g., using select()/poll()) will re-invoke transfer_step() when the socket is ready.
 
-    // Send CERT_INFO
-    // Payload: [4 bytes: total size][Optional: filename/metadata]
-    uint8_t info_payload[4];
-    uint32_t net_size = htonl((uint32_t)cert_size);
-    memcpy(info_payload, &net_size, 4);
-    ret = send_message(ssl, 0x02, info_payload, 4);
-    if (ret < 0) {
-        fclose(f);
-        fprintf(stderr, "Failed to send CERT_INFO: %d\n", ret);
-        return ret;
-    }
+State Definition (Similar to Above)
+We use a similar context, but we rely heavily on partial read/write functions:*/
 
-    // Send CERT_DATA in chunks
-    uint8_t data_chunk[4096];
-    size_t n;
-    while ((n = fread(data_chunk, 1, sizeof(data_chunk), f)) > 0) {
-        ret = send_message(ssl, 0x03, data_chunk, (uint32_t)n);
-        if (ret < 0) {
-            fclose(f);
-            fprintf(stderr, "Failed to send CERT_DATA chunk: %d\n", ret);
+typedef enum {
+    STATE_IDLE,
+    STATE_REQUEST_SENT,
+    STATE_WAITING_CERT_INFO_HEADER,
+    STATE_WAITING_CERT_INFO_PAYLOAD,
+    STATE_RECEIVING_CHUNKS,
+    STATE_WAITING_CHUNK_HEADER,
+    STATE_WAITING_CHUNK_DATA,
+    STATE_TRANSFER_COMPLETE
+} transfer_state_t;
+
+typedef struct {
+    mbedtls_ssl_context *ssl;
+    transfer_state_t state;
+    FILE *file;
+    uint8_t header[5];
+    size_t header_bytes_read;
+    uint8_t *payload;
+    size_t payload_len;
+    size_t payload_bytes_read;
+    uint32_t total_size;
+    uint32_t bytes_received;
+    int completed;
+} transfer_context_t;
+Non-blocking Step Function
+int transfer_step(transfer_context_t *ctx) {
+    int ret;
+
+    switch (ctx->state) {
+    case STATE_REQUEST_SENT:
+        // We expect CERT_INFO header next
+        ctx->header_bytes_read = 0;
+        ctx->state = STATE_WAITING_CERT_INFO_HEADER;
+        // fall through
+
+    case STATE_WAITING_CERT_INFO_HEADER:
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->header, 5, &ctx->header_bytes_read);
+        if (ret != TRANSFER_OK) {
+            return ret; // WANT_READ/WRITE or ERROR
+        }
+
+        if (ctx->header[0] != MSG_CERT_INFO) {
+            return TRANSFER_ERROR;
+        }
+
+        uint32_t net_len;
+        memcpy(&net_len, ctx->header + 1, 4);
+        ctx->payload_len = ntohl(net_len);
+        ctx->payload = realloc(ctx->payload, ctx->payload_len);
+        ctx->payload_bytes_read = 0;
+        ctx->state = STATE_WAITING_CERT_INFO_PAYLOAD;
+        // fall through
+
+    case STATE_WAITING_CERT_INFO_PAYLOAD:
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->payload, ctx->payload_len, &ctx->payload_bytes_read);
+        if (ret != TRANSFER_OK) {
             return ret;
         }
+        // Parse CERT_INFO payload
+        uint32_t net_size;
+        memcpy(&net_size, ctx->payload, 4);
+        ctx->total_size = ntohl(net_size);
+        free(ctx->payload);
+        ctx->payload = NULL;
+
+        ctx->bytes_received = 0;
+        // Now move to receiving chunks
+        ctx->state = STATE_WAITING_CHUNK_HEADER;
+        ctx->header_bytes_read = 0;
+        return TRANSFER_OK;
+
+    case STATE_WAITING_CHUNK_HEADER:
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->header, 5, &ctx->header_bytes_read);
+        if (ret != TRANSFER_OK) {
+            return ret;
+        }
+        // Parse the header
+        if (ctx->header[0] == MSG_TRANSFER_COMPLETE) {
+            ctx->state = STATE_TRANSFER_COMPLETE;
+            ctx->completed = 1;
+            return TRANSFER_OK;
+        }
+
+        if (ctx->header[0] != MSG_CERT_DATA) {
+            return TRANSFER_ERROR;
+        }
+
+        memcpy(&net_len, ctx->header + 1, 4);
+        ctx->payload_len = ntohl(net_len);
+        ctx->payload = realloc(ctx->payload, ctx->payload_len);
+        ctx->payload_bytes_read = 0;
+        ctx->state = STATE_WAITING_CHUNK_DATA;
+        return TRANSFER_OK;
+
+    case STATE_WAITING_CHUNK_DATA:
+        ret = read_bytes_nonblocking(ctx->ssl, ctx->payload, ctx->payload_len, &ctx->payload_bytes_read);
+        if (ret != TRANSFER_OK) {
+            return ret;
+        }
+        // Write chunk to file
+        fwrite(ctx->payload, 1, ctx->payload_len, ctx->file);
+        ctx->bytes_received += ctx->payload_len;
+
+        // Wait for next chunk header
+        ctx->state = STATE_WAITING_CHUNK_HEADER;
+        ctx->header_bytes_read = 0;
+        return TRANSFER_OK;
+
+    case STATE_TRANSFER_COMPLETE:
+        // Do nothing, we’re done
+        return TRANSFER_OK;
+
+    default:
+        return TRANSFER_OK;
     }
+}
+/*Explanation:
 
-    fclose(f);
+Each call tries to advance the state machine as far as possible.
+If more data is needed from the network and is not available, the function returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE. Your event loop can then wait for the socket to be ready and call transfer_step() again.
+The logic is broken down into small states, each representing a precise step in the protocol parsing.
+3. Using Callbacks and Events
 
-    // Send TRANSFER_COMPLETE
-    ret = send_message(ssl, 0x04, NULL, 0);
-    if (ret < 0) {
-        fprintf(stderr, "Failed to send TRANSFER_COMPLETE: %d\n", ret);
-        return ret;
+Instead of the main logic directly reading/writing files, you can use callbacks to notify the application layer of events. For example:*/
+
+typedef struct {
+    void (*on_cert_info)(void *user_data, uint32_t total_size);
+    void (*on_chunk)(void *user_data, const uint8_t *data, size_t length);
+    void (*on_complete)(void *user_data);
+    void (*on_error)(void *user_data, int error_code);
+    void *user_data;
+    // Same fields as before for state tracking...
+} transfer_context_t;
+/*In transfer_step(), whenever CERT_INFO is fully read, call ctx->on_cert_info(user_data, total_size). For each CERT_DATA chunk, call ctx->on_chunk(user_data, data, length). Upon completion, call ctx->on_complete(user_data). On errors, ctx->on_error.
+
+This decouples the transfer logic from the file writing. The application might store chunks in memory, write them to disk asynchronously, or process them differently.
+
+4. Integrating with a Real Event Loop
+
+If you’re using select() or poll(), your main loop might look like this:*/
+
+// Pseudocode
+while (!ctx->completed) {
+    fd_set read_fds, write_fds;
+    FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
+
+    // If last return was WANT_READ, watch for readable
+    FD_SET(ssl_fd, &read_fds);
+    // If WANT_WRITE, watch for writable
+    // If OK, just watch read (if reading) or write (if sending)
+
+    select(...);
+
+    int ret = transfer_step(ctx);
+    if (ret == TRANSFER_ERROR) {
+        // Handle error
+        break;
+    } else if (ret == TRANSFER_WANT_READ) {
+        // Next iteration, wait for readable
+    } else if (ret == TRANSFER_WANT_WRITE) {
+        // Next iteration, wait for writable
     }
-
-    return 0;
 }
 
-/*This server-side function waits for a REQUEST_CERT and then sends the file in CERT_INFO and CERT_DATA messages, finishing with TRANSFER_COMPLETE.
+// Once complete, close file, clean up
+/*Explanation:
 
-5. Error Handling and Edge Cases
-Partial Reads/Writes: mbedtls_ssl_read() and mbedtls_ssl_write() might not read/write the entire requested amount in one call. You might need loops to ensure you read/write the full amount. The sample code above assumes you get the full amount. In production, wrap these calls in helper functions that ensure full reads/writes.
-Timeouts and Interruptions: Handle SSL interruptions (e.g., MBEDTLS_ERR_SSL_WANT_READ/_WRITE) by re-calling the functions as needed.
-Versioning: Consider adding a protocol version byte at the start of your exchange if you plan long-term maintenance.
-Multiple Certificates: If you need to handle multiple certificates, include an identifier in the REQUEST_CERT payload and parse it in the server, or allow the server to send a list first.
-6. Testing
-Test with a small certificate file first.
-Enable debug logs in mbedtls to see if messages are going through correctly.
-Check that the received file matches the sent file byte-for-byte.
-Add print statements when reading/writing messages to ensure correct message types and sizes.
+The event loop waits until the underlying socket is ready.
+When ready, transfer_step() tries to make progress.
+If it can’t proceed due to lack of data (WANT_READ) or inability to write (WANT_WRITE), control returns to the event loop to wait again.
 Summary
 
-By following the above steps, you will have:
-
-A simple binary protocol layered on top of TLS/PSK.
-Defined message types and structures for exchanging certificate files.
-Basic sender and receiver functions for both client and server.
-A foundation that is easy to extend for other file types or metadata if needed.
+Synchronous with State Machine:
+We showed how to break the logic into states, even if the code blocks on I/O. This makes the code more maintainable and easier to extend.
+Asynchronous/Non-Blocking:
+We introduced partial read/write helpers and extended the state machine to return early when the operation would block. This allows integration with event loops and asynchronous frameworks.
+Callbacks and Events:
+Using callbacks decouples the data handling (like file writes) from the protocol state machine. It’s a clean architecture for larger systems.
+Event Loop Integration:
+We demonstrated how you might integrate the asynchronous step function into an event loop with select() or poll().
+By combining these patterns, you can tailor the solution to your needs. For instance, you might implement a non-blocking state machine with callbacks for a GUI application, or a synchronous state machine for a simple command-line tool. The key idea is to separate protocol state management from raw I/O operations and application logic, leading to cleaner, more modular, and more flexible code.*/
