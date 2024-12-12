@@ -1,9 +1,14 @@
-/*Below are detailed suggestions and design options for evolving your current certificate exchange protocol into a more flexible, non-blocking (asynchronous) or state-machine-driven implementation. The goal is to decouple the raw I/O operations from the logic of sending/receiving certificates, provide a clear structure for the protocol state, and allow the application to integrate the file transfer smoothly into event-driven or asynchronous frameworks.
+/*Below are detailed suggestions and design options for evolving your current certificate exchange protocol into a more flexible, non-blocking 
+(asynchronous) or state-machine-driven implementation. The goal is to decouple the raw I/O operations from the logic of sending/receiving certificates,
+provide a clear structure for the protocol state, and allow the application to integrate the file transfer smoothly into event-driven or asynchronous frameworks.
 
-Goals
 
-Non-blocking I/O Support: Instead of waiting (blocking) for mbedtls_ssl_read() or mbedtls_ssl_write() to complete, allow the code to return immediately if it cannot proceed, and resume when more data is available or when the network is ready for writing. This can allow integration into event loops, select()/poll()-based I/O, or asynchronous frameworks.
-State Machine for Protocol Logic: Introduce a state machine to keep track of what part of the protocol you’re in. Instead of writing a large monolithic function that waits for each message (blocking), you keep track of a current state (e.g., "EXPECTING_CERT_INFO" or "SENDING_CHUNKS") and call a step function that attempts to do whatever is needed at that moment. If the I/O is not ready, you return and later resume from the same state.
+Non-blocking I/O Support: Instead of waiting (blocking) for mbedtls_ssl_read() or mbedtls_ssl_write() to complete, allow the code to return immediately if it 
+cannot proceed, and resume when more data is available or when the network is ready for writing. This can allow integration into event loops, select()/poll()-based I/O,
+or asynchronous frameworks.
+State Machine for Protocol Logic: Introduce a state machine to keep track of what part of the protocol you’re in. Instead of writing a large monolithic function that 
+waits for each message (blocking), you keep track of a current state (e.g., "EXPECTING_CERT_INFO" or "SENDING_CHUNKS") and call a step function that attempts to do 
+whatever is needed at that moment. If the I/O is not ready, you return and later resume from the same state.
 Context Structure: Define a context structure that holds:
 The current state of the protocol exchange.
 Buffers for partial reads/writes.
@@ -21,8 +26,9 @@ Possible Approaches
 1. Fully Asynchronous with Event Loop Integration
 Concept:
 
-You run a main event loop (e.g., select(), poll(), or epoll() on sockets) and whenever the TLS socket is readable or writable, you call a "process step" function of your state machine.
-The state machine tries to read or write what it needs and if it can’t proceed (e.g., mbedtls_ssl_read() returns MBEDTLS_ERR_SSL_WANT_READ), it just stops and returns control to the event loop.
+You run a main event loop (e.g., select(), poll(), or epoll() on sockets) and whenever the TLS socket is readable or writable, you call a "process step" function of 
+your state machine. The state machine tries to read or write what it needs and if it can’t proceed (e.g., mbedtls_ssl_read() returns MBEDTLS_ERR_SSL_WANT_READ), it 
+just stops and returns control to the event loop.
 How to Implement:
 
 Context Structure (transfer_context_t):*/
@@ -52,11 +58,14 @@ typedef struct {
     size_t payload_buffer_size;
     // You might also store callbacks or user data here
 } transfer_context_t;
-/*Non-blocking I/O Considerations: With mbedtls, you can use a non-blocking socket underneath. Typically, you set the underlying BIO (callback for send/recv) to return MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE when the operation would block. Your state machine functions then detect these return values and simply return to the caller, which will later retry.
+/*Non-blocking I/O Considerations: With mbedtls, you can use a non-blocking socket underneath. Typically, you set the underlying BIO (callback for send/recv) to return
+MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE when the operation would block. Your state machine functions then detect these return values and simply return 
+to the caller, which will later retry.
 Step Function: Create a function like int transfer_step(transfer_context_t *ctx) that:
 Looks at ctx->state.
 Based on the state, tries to perform the next action (e.g., read the next message header, read payload, write next chunk of data).
-If mbedtls_ssl_read() or mbedtls_ssl_write() returns a "want read/write" error, just return to the event loop. The state machine remains in the same state. Next time the socket is ready, you call transfer_step() again.
+If mbedtls_ssl_read() or mbedtls_ssl_write() returns a "want read/write" error, just return to the event loop. The state machine remains in the same state. Next time the
+socket is ready, you call transfer_step() again.
 When a state transition condition is met (e.g., finished reading CERT_INFO), move ctx->state to the next state (e.g., STATE_RECEIVING_DATA).
 If completed (e.g., all data received), set ctx->state to STATE_TRANSFER_COMPLETE.
 Advantages:
@@ -76,15 +85,16 @@ on_cert_info_received(total_size)
 on_chunk_received(data, length)
 on_transfer_complete()
 on_error(error_code)
-/*Your state machine code calls these callbacks when events occur. The application is then free to handle them asynchronously (e.g., store the data in memory, write to file, notify the GUI, etc.).
-This approach naturally leads to a clean separation of concerns: the state machine knows about the protocol, while the application logic is in callbacks.
+/*Your state machine code calls these callbacks when events occur. The application is then free to handle them asynchronously (e.g., store the data in memory, write to file,
+notify the GUI, etc.). This approach naturally leads to a clean separation of concerns: the state machine knows about the protocol, while the application logic is in callbacks.
 4. Ring Buffers or Queues for Data
 If you want to avoid blocking on writes, you might use a send queue:
 
 Maintain a buffer or queue of messages (headers + payloads) that you want to send.
 The state machine tries to send whatever is at the front of the queue.
 If it can’t send everything at once (non-blocking), it remembers how far it got. Next time transfer_step() is called and the socket is writable, it continues from there.
-This approach can also be applied to reading. If mbedtls_ssl_read() only provides partial data, you store it in a buffer until you have the full header or payload, then process it. The state machine only transitions states when full messages have been accumulated.
+This approach can also be applied to reading. If mbedtls_ssl_read() only provides partial data, you store it in a buffer until you have the full header or payload, then process 
+it. The state machine only transitions states when full messages have been accumulated.
 
 5. Integrating with Other Protocols or Multiple Certificates
 The state machine approach makes it easy to add complexity:
@@ -107,12 +117,15 @@ STATE_SENDING_INFO: sending CERT_INFO
 STATE_SENDING_DATA: sending all chunks
 STATE_SENDING_COMPLETE: sending TRANSFER_COMPLETE
 Write Helper Functions for Partial I/O:
-Functions like read_bytes_nonblocking(ssl, buffer, length, &bytes_read_so_far) that attempt to read exactly length bytes into buffer, updating bytes_read_so_far each call. If incomplete, return a "would block" status. If complete, return success.
+Functions like read_bytes_nonblocking(ssl, buffer, length, &bytes_read_so_far) that attempt to read exactly length bytes into buffer, updating bytes_read_so_far each call. 
+If incomplete, return a "would block" status. If complete, return success.
 Similarly for writing: write_bytes_nonblocking(ssl, buffer, length, &bytes_written_so_far).
 Handle Headers and Payloads in Steps:
-Each message read consists of two steps: first read the 5-byte header (possibly in multiple partial reads), then read the payload. The state machine might have intermediate sub-states or just variables that track where you are (e.g., header_bytes_read < 5, etc.).
+Each message read consists of two steps: first read the 5-byte header (possibly in multiple partial reads), then read the payload. The state machine might have intermediate 
+sub-states or just variables that track where you are (e.g., header_bytes_read < 5, etc.).
 Return Control Early:
-On MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, immediately return from transfer_step() to let the event loop handle other tasks. The next call to transfer_step() (when conditions are right) will resume from the same state and partial read/write positions.
+On MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, immediately return from transfer_step() to let the event loop handle other tasks. The next call to transfer_step() 
+(when conditions are right) will resume from the same state and partial read/write positions.
 Example Pseudocode for a Step Function*/
 int transfer_step(transfer_context_t *ctx) {
     int ret;
@@ -182,7 +195,8 @@ int transfer_step(transfer_context_t *ctx) {
 
     return 0; // success or still working, no error
 }
-/*This pseudocode shows that in each step, you attempt exactly what’s needed next. If you cannot complete the operation because the socket is not ready, you return a special code (like WANT_READ), and the caller can wait and call again when ready. This approach decouples the protocol logic from the actual blocking nature of I/O.
+/*This pseudocode shows that in each step, you attempt exactly what’s needed next. If you cannot complete the operation because the socket is not ready, you return a 
+special code (like WANT_READ), and the caller can wait and call again when ready. This approach decouples the protocol logic from the actual blocking nature of I/O.
 
 In summary: To move from a blocking, linear implementation to a flexible, asynchronous or state-machine-driven one, you will:
 
@@ -191,7 +205,8 @@ Use a context structure to hold state, buffers, and progress indicators.
 Implement partial read/write functions to handle non-blocking I/O.
 Integrate these into an event-driven loop or repeatedly call a step function until completion.
 Optionally, use callbacks or events to notify the application of progress and completion.
-This gives you a robust, extensible architecture that can handle multiple simultaneous transfers, integrate into GUIs or servers handling many clients, and cleanly handle complex protocol logic.
+This gives you a robust, extensible architecture that can handle multiple simultaneous transfers, integrate into GUIs or servers handling many clients, and cleanly 
+handle complex protocol logic.
 
 
 
@@ -204,10 +219,13 @@ Please detail the implementation of each approach, in code along with proper exp
 ChatGPT
 
 **Thought about Asynchronous & Synchronous Implementations** for a couple of seconds
-Below are detailed examples of how to refactor your current certificate-transfer protocol into more flexible architectures, both asynchronous and synchronous, using a state machine. We will provide code snippets and step-by-step explanations for each approach. You can mix and match ideas from these approaches depending on the constraints and style of your project.
+Below are detailed examples of how to refactor your current certificate-transfer protocol into more flexible architectures, both asynchronous and synchronous, using a 
+state machine. We will provide code snippets and step-by-step explanations for each approach. You can mix and match ideas from these approaches depending on the constraints
+and style of your project.
 
 Important Note:
-These are conceptual reference implementations. In practice, you will need to handle error cases, integrate with your actual I/O event loops, and potentially adapt function signatures. The code is intentionally simplified to illustrate the design patterns and state machine logic, rather than being a fully tested, production-ready code drop.
+These are conceptual reference implementations. In practice, you will need to handle error cases, integrate with your actual I/O event loops, and potentially adapt function 
+signatures. The code is intentionally simplified to illustrate the design patterns and state machine logic, rather than being a fully tested, production-ready code drop.
 
 Common Foundations
 
@@ -221,7 +239,8 @@ We start with the same message definitions and message structure as before:*/
 /*Each message: 1-byte type, 4-byte length (network order), followed by payload of length bytes.
 
 Non-blocking I/O Handling with mbedtls
-For non-blocking I/O, you must set up the underlying socket in non-blocking mode and configure mbedtls BIO callbacks accordingly. When mbedtls_ssl_read() or mbedtls_ssl_write() returns MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, it means you must stop and wait for the socket to become readable/writable again before continuing.
+For non-blocking I/O, you must set up the underlying socket in non-blocking mode and configure mbedtls BIO callbacks accordingly. When mbedtls_ssl_read() or mbedtls_ssl_write()
+returns MBEDTLS_ERR_SSL_WANT_READ or MBEDTLS_ERR_SSL_WANT_WRITE, it means you must stop and wait for the socket to become readable/writable again before continuing.
 
 You can define small helper functions for partial reads/writes:*/
 
@@ -277,7 +296,8 @@ int write_bytes_nonblocking(mbedtls_ssl_context *ssl, const uint8_t *buf, size_t
 }
 //1. Synchronous Code with an Internal State Machine
 
-//Even in a synchronous approach, using a state machine makes the code cleaner and more modular. The difference here is that we will just loop until we finish or encounter an error, and we assume blocking I/O for simplicity. If read/write can block, that’s acceptable for this scenario. You can also integrate timeouts.
+//Even in a synchronous approach, using a state machine makes the code cleaner and more modular. The difference here is that we will just loop until we finish or encounter 
+//an error, and we assume blocking I/O for simplicity. If read/write can block, that’s acceptable for this scenario. You can also integrate timeouts.
 
 //State Definition
 typedef enum {
@@ -373,7 +393,8 @@ Explanation:
 The logic is structured by states, making the code easier to follow than a single monolithic function.
 2. Asynchronous with Event Loop Integration
 
-In this approach, we do not block. Instead, transfer_step() returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE when it needs more I/O. The event loop (e.g., using select()/poll()) will re-invoke transfer_step() when the socket is ready.
+In this approach, we do not block. Instead, transfer_step() returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE when it needs more I/O. The event 
+loop (e.g., using select()/poll()) will re-invoke transfer_step() when the socket is ready.
 
 State Definition (Similar to Above)
 We use a similar context, but we rely heavily on partial read/write functions:*/
@@ -497,7 +518,8 @@ int transfer_step(transfer_context_t *ctx) {
 /*Explanation:
 
 Each call tries to advance the state machine as far as possible.
-If more data is needed from the network and is not available, the function returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE. Your event loop can then wait for the socket to be ready and call transfer_step() again.
+If more data is needed from the network and is not available, the function returns TRANSFER_WANT_READ or TRANSFER_WANT_WRITE. Your event loop can then 
+wait for the socket to be ready and call transfer_step() again.
 The logic is broken down into small states, each representing a precise step in the protocol parsing.
 3. Using Callbacks and Events
 
@@ -511,9 +533,11 @@ typedef struct {
     void *user_data;
     // Same fields as before for state tracking...
 } transfer_context_t;
-/*In transfer_step(), whenever CERT_INFO is fully read, call ctx->on_cert_info(user_data, total_size). For each CERT_DATA chunk, call ctx->on_chunk(user_data, data, length). Upon completion, call ctx->on_complete(user_data). On errors, ctx->on_error.
+/*In transfer_step(), whenever CERT_INFO is fully read, call ctx->on_cert_info(user_data, total_size). For each CERT_DATA chunk, 
+call ctx->on_chunk(user_data, data, length). Upon completion, call ctx->on_complete(user_data). On errors, ctx->on_error.
 
-This decouples the transfer logic from the file writing. The application might store chunks in memory, write them to disk asynchronously, or process them differently.
+This decouples the transfer logic from the file writing. The application might store chunks in memory, write them to disk asynchronously, or process 
+them differently.
 
 4. Integrating with a Real Event Loop
 
@@ -554,9 +578,12 @@ Summary
 Synchronous with State Machine:
 We showed how to break the logic into states, even if the code blocks on I/O. This makes the code more maintainable and easier to extend.
 Asynchronous/Non-Blocking:
-We introduced partial read/write helpers and extended the state machine to return early when the operation would block. This allows integration with event loops and asynchronous frameworks.
+We introduced partial read/write helpers and extended the state machine to return early when the operation would block. This allows integration 
+with event loops and asynchronous frameworks.
 Callbacks and Events:
 Using callbacks decouples the data handling (like file writes) from the protocol state machine. It’s a clean architecture for larger systems.
 Event Loop Integration:
 We demonstrated how you might integrate the asynchronous step function into an event loop with select() or poll().
-By combining these patterns, you can tailor the solution to your needs. For instance, you might implement a non-blocking state machine with callbacks for a GUI application, or a synchronous state machine for a simple command-line tool. The key idea is to separate protocol state management from raw I/O operations and application logic, leading to cleaner, more modular, and more flexible code.*/
+By combining these patterns, you can tailor the solution to your needs. For instance, you might implement a non-blocking state machine with 
+callbacks for a GUI application, or a synchronous state machine for a simple command-line tool. The key idea is to separate protocol state management
+from raw I/O operations and application logic, leading to cleaner, more modular, and more flexible code.*/
