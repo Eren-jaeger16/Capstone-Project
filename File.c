@@ -587,3 +587,100 @@ We demonstrated how you might integrate the asynchronous step function into an e
 By combining these patterns, you can tailor the solution to your needs. For instance, you might implement a non-blocking state machine with 
 callbacks for a GUI application, or a synchronous state machine for a simple command-line tool. The key idea is to separate protocol state management
 from raw I/O operations and application logic, leading to cleaner, more modular, and more flexible code.*/
+
+
+/*The issue you’re encountering is most likely due to the switch case “fall-through” behavior in C. 
+In a switch statement, if you do not explicitly use a break; (or another terminating statement 
+like return) at the end of a case, execution will continue into the next case block.
+
+In your code, each case in the switch looks like this:*/
+
+switch (ctx->state) {
+
+case EXCH_STATE_IDLE:
+    if (request_cert(&ctx->ssl) == 1) {
+        ctx->state = EXCH_STATE_CERT_REQUESTED;
+        return 1;
+    }
+    // No break here, so execution continues directly to EXCH_STATE_CERT_REQUESTED
+
+case EXCH_STATE_CERT_REQUESTED:
+    printf("%d\n", receive_cert(&ctx->ssl, ctx->save_path));
+    if (receive_cert(&ctx->ssl, ctx->save_path) == 1) {
+        printf("%d\n", receive_cert(&ctx->ssl, ctx->save_path));
+        ctx->state = EXCH_STATE_CERT_RECEIVED;
+        return 1;
+    }
+    // No break here, so execution continues directly to EXCH_STATE_CERT_RECEIVED
+
+case EXCH_STATE_CERT_RECEIVED:
+    if ((send_ack(&ctx->ssl)) == 1 && (send_cert_response(&ctx->ssl, ctx->cert_path) == 1)) {
+        ctx->state = EXCH_STATE_CERT_EXCHANGED;
+        return 1;
+    }
+    // No break here, so it will continue to the next case if not returned
+
+case EXCH_STATE_CERT_EXCHANGED:
+    if (receive_ack(&ctx->ssl) == 1) {
+        ctx->done = 1;
+        return 1;
+    }
+    // No break here either
+}
+What this means is:
+
+/*If EXCH_STATE_IDLE doesn’t cause a return, execution will fall through and attempt EXCH_STATE_CERT_REQUESTED logic.
+If EXCH_STATE_CERT_REQUESTED doesn’t cause a return, it falls through to EXCH_STATE_CERT_RECEIVED, and so on.
+Because your code doesn't have break; statements, when receive_cert() returns 0 in EXCH_STATE_CERT_REQUESTED, 
+the code continues into the EXCH_STATE_CERT_RECEIVED block—executing code that it shouldn’t.
+
+How to Fix It:
+
+Add break; statements at the end of each case block if you do not want to fall through. For example:*/
+switch (ctx->state) {
+
+case EXCH_STATE_IDLE:
+    if (request_cert(&ctx->ssl) == 1) {
+        ctx->state = EXCH_STATE_CERT_REQUESTED;
+        return 1;
+    }
+    break; // Stop fall-through if no return
+
+case EXCH_STATE_CERT_REQUESTED:
+    printf("%d\n", receive_cert(&ctx->ssl, ctx->save_path));
+    if (receive_cert(&ctx->ssl, ctx->save_path) == 1) {
+        printf("%d\n", receive_cert(&ctx->ssl, ctx->save_path));
+        ctx->state = EXCH_STATE_CERT_RECEIVED;
+        return 1;
+    }
+    break; // Stop fall-through
+
+case EXCH_STATE_CERT_RECEIVED:
+    if ((send_ack(&ctx->ssl)) == 1 && (send_cert_response(&ctx->ssl, ctx->cert_path) == 1)) {
+        ctx->state = EXCH_STATE_CERT_EXCHANGED;
+        return 1;
+    }
+    break; // Stop fall-through
+
+case EXCH_STATE_CERT_EXCHANGED:
+    if (receive_ack(&ctx->ssl) == 1) {
+        ctx->done = 1;
+        return 1;
+    }
+    break; // Stop fall-through
+
+default:
+    break;
+}
+
+/*Consider storing the result of receive_cert() in a variable if you need to print and check it more
+than once, rather than calling the function multiple times. Each function call might change state or
+consume data:*/
+
+int res = receive_cert(&ctx->ssl, ctx->save_path);
+printf("%d\n", res);
+if (res == 1) {
+    // ...
+}
+/*By adding break; statements and ensuring that functions are not called multiple times unnecessarily,
+    you should prevent unintended code execution and ensure the switch handles states as intended.*/
