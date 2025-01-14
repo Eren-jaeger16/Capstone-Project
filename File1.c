@@ -852,15 +852,18 @@ Efficiency: The client doesn’t block while waiting for server responses.
 Scalability: Multiple clients can operate concurrently in event-driven environments.
 Flexibility: The state machine can be extended for additional protocol steps.*/
 
-Great! Let's walk through unit testing with the Seatest framework step by step.
+/*Great! Let's walk through unit testing with the Seatest framework step by step.
 
 What Is Unit Testing?
-Unit testing verifies individual components (functions, classes, modules) of your code to ensure they behave as expected. With the Seatest framework, you'll write test cases for specific functions in your program.
+Unit testing verifies individual components (functions, classes, modules) of your
+code to ensure they behave as expected. With the Seatest framework, you'll write 
+test cases for specific functions in your program.
 
 Step-by-Step Guide
 1. Install Seatest
 
-If you haven’t already, download the Seatest framework. Seatest is a single header file (seatest.h), so you only need to include it in your project.
+If you haven’t already, download the Seatest framework. Seatest is a single header
+file (seatest.h), so you only need to include it in your project.
 
 Download seatest.h from the official repository: Seatest GitHub
 Place seatest.h in your project's include directory.
@@ -872,9 +875,10 @@ seatest.h
 Your program's headers (to test your functions).
 3. Write a Test Function
 
-Each test function should focus on a single aspect of the function you're testing. Here's an example for a hypothetical send_cert_req() function.
+Each test function should focus on a single aspect of the function you're testing. 
+Here's an example for a hypothetical send_cert_req() function.
 
-Test Code Example: test_send_cert_req
+Test Code Example: test_send_cert_req*/
 #include "seatest.h"
 #include "protocol.h" // Replace with your actual header file
 
@@ -903,11 +907,12 @@ void test_send_cert_req()
     assert_int_equal(0, buffer[3]);
     assert_int_equal(0, buffer[4]);
 }
-4. Write a Suite of Tests
+
+/*4. Write a Suite of Tests
 
 Group related tests into a suite. For example:
 
-Test Suite: protocol_tests
+Test Suite: protocol_tests*/
 void protocol_tests()
 {
     test_fixture_start(); // Start a group of related tests
@@ -915,9 +920,10 @@ void protocol_tests()
     // Add other related test functions
     test_fixture_end(); // End the group of tests
 }
-5. Set Up Main Function
+/*5. Set Up Main Function
 
-Seatest requires a main() function to initialize and run your test suites:
+Seatest requires a main() function to initialize and run 
+your test suites:*/
 
 #include "seatest.h"
 
@@ -931,7 +937,7 @@ int main(int argc, char **argv)
 {
     return seatest_testrunner(argc, argv, all_tests);
 }
-6. Compile and Run
+/*6. Compile and Run
 
 Compile the test code with your program:
 gcc -o test_protocol test_protocol.c protocol.c -I. -lmbedtls
@@ -941,7 +947,7 @@ You’ll see output like:
 Running test: test_send_cert_req
 OK
 Example Test Cases for Protocol Functions
-1. Test send_cert_resp()
+1. Test send_cert_resp()*/
 
 void test_send_cert_resp()
 {
@@ -969,7 +975,7 @@ void test_send_cert_resp()
     // Verify the payload
     assert_string_equal(dummy_cert, (char *)&buffer[5]);
 }
-2. Test receive_ack()
+/*2. Test receive_ack()*/
 
 void test_receive_ack()
 {
@@ -985,7 +991,7 @@ void test_receive_ack()
     // Verify return value
     assert_int_equal(0, ret);
 }
-7. Expand Your Tests
+/*7. Expand Your Tests
 Write similar tests for:
 
 Timeouts: Mock delayed responses to verify timeout handling.
@@ -1001,7 +1007,7 @@ Assertion failed: expected 0 but got 1 (line 24)
 FAIL
 Fix the implementation or refine the test case to handle the edge case appropriately.
 9. Automating Tests
-Automate running tests with a simple script:
+Automate running tests with a simple script:*/
 
 #!/bin/bash
 gcc -o test_protocol test_protocol.c protocol.c -I. -lmbedtls
@@ -1010,28 +1016,32 @@ if ./test_protocol; then
 else
     echo "Some tests failed. Check the logs."
 fi
-Key Concepts Recap
+/*Key Concepts Recap
 Seatest Basics:
 Use assert_* macros to verify expected behavior.
 Group tests into suites and call them in main().
 Mocking:
-Mock dependencies (e.g., mbedtls_ssl_context) to isolate the function being tested.
+Mock dependencies (e.g., mbedtls_ssl_context) to isolate the function 
+being tested.
 Iterative Testing:
 Start with small, simple test cases.
 Gradually add tests for edge cases and failure scenarios.
-Would you like help writing tests for specific protocol functions or automating the process further?
+Would you like help writing tests for specific protocol functions or 
+automating the process further?*/
 
 
 
 
 
-
+/*
 You said:
 Help me automate everything please with explanations
 ChatGPT said:
 
 ChatGPT
-Automating your unit testing workflow ensures consistency and efficiency in verifying your code's functionality. Here's how to set up a fully automated workflow, step by step.
+Automating your unit testing workflow ensures consistency
+and efficiency in verifying your code's functionality. Here's
+how to set up a fully automated workflow, step by step.
 
 Automation Overview
 The goal is to:
@@ -1053,7 +1063,8 @@ Organize your project for clarity:
 ├── Makefile           # Build automation
 └── run_tests.sh       # Test automation script
 2. Automating Compilation (Makefile)
-A Makefile simplifies building your program and tests. Create a Makefile in your project root:
+A Makefile simplifies building your program and tests. 
+	Create a Makefile in your project root:*/
 
 Makefile
 
