@@ -851,3 +851,365 @@ Advantages of the Non-Blocking State Machine
 Efficiency: The client doesn’t block while waiting for server responses.
 Scalability: Multiple clients can operate concurrently in event-driven environments.
 Flexibility: The state machine can be extended for additional protocol steps.*/
+
+Great! Let's walk through unit testing with the Seatest framework step by step.
+
+What Is Unit Testing?
+Unit testing verifies individual components (functions, classes, modules) of your code to ensure they behave as expected. With the Seatest framework, you'll write test cases for specific functions in your program.
+
+Step-by-Step Guide
+1. Install Seatest
+
+If you haven’t already, download the Seatest framework. Seatest is a single header file (seatest.h), so you only need to include it in your project.
+
+Download seatest.h from the official repository: Seatest GitHub
+Place seatest.h in your project's include directory.
+2. Set Up a Test Project
+
+Create a new source file for your unit tests, e.g., test_protocol.c.
+Include the following headers:
+seatest.h
+Your program's headers (to test your functions).
+3. Write a Test Function
+
+Each test function should focus on a single aspect of the function you're testing. Here's an example for a hypothetical send_cert_req() function.
+
+Test Code Example: test_send_cert_req
+#include "seatest.h"
+#include "protocol.h" // Replace with your actual header file
+
+// Mock TLS context (for unit testing purposes)
+mbedtls_ssl_context mock_ssl;
+
+// Test if `send_cert_req` correctly writes the CERT_REQ message
+void test_send_cert_req()
+{
+    uint8_t buffer[5];
+    int ret;
+
+    // Mock the SSL write operation
+    mbedtls_ssl_set_bio(&mock_ssl, buffer, sizeof(buffer));
+
+    // Call the function
+    ret = send_cert_req(&mock_ssl);
+
+    // Verify the return value is success
+    assert_int_equal(0, ret);
+
+    // Verify the written data
+    assert_int_equal(CERT_REQ, buffer[0]); // Type
+    assert_int_equal(0, buffer[1]);        // Payload size (zero for CERT_REQ)
+    assert_int_equal(0, buffer[2]);
+    assert_int_equal(0, buffer[3]);
+    assert_int_equal(0, buffer[4]);
+}
+4. Write a Suite of Tests
+
+Group related tests into a suite. For example:
+
+Test Suite: protocol_tests
+void protocol_tests()
+{
+    test_fixture_start(); // Start a group of related tests
+    run_test(test_send_cert_req); // Add your tests here
+    // Add other related test functions
+    test_fixture_end(); // End the group of tests
+}
+5. Set Up Main Function
+
+Seatest requires a main() function to initialize and run your test suites:
+
+#include "seatest.h"
+
+// Main function to run all test suites
+void all_tests()
+{
+    protocol_tests(); // Add other test suites here
+}
+
+int main(int argc, char **argv)
+{
+    return seatest_testrunner(argc, argv, all_tests);
+}
+6. Compile and Run
+
+Compile the test code with your program:
+gcc -o test_protocol test_protocol.c protocol.c -I. -lmbedtls
+Run the tests:
+./test_protocol
+You’ll see output like:
+Running test: test_send_cert_req
+OK
+Example Test Cases for Protocol Functions
+1. Test send_cert_resp()
+
+void test_send_cert_resp()
+{
+    uint8_t buffer[1024];
+    int ret;
+
+    // Mock the SSL context and buffer
+    mbedtls_ssl_set_bio(&mock_ssl, buffer, sizeof(buffer));
+
+    // Prepare a dummy certificate
+    const char *dummy_cert = "TEST_CERTIFICATE";
+    size_t cert_len = strlen(dummy_cert);
+
+    // Call the function
+    ret = send_cert_resp(&mock_ssl, dummy_cert, cert_len);
+
+    // Verify return value
+    assert_int_equal(0, ret);
+
+    // Verify the header
+    assert_int_equal(CERT_RESP, buffer[0]);
+    uint32_t payload_size = (buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8) | buffer[4];
+    assert_int_equal(cert_len, payload_size);
+
+    // Verify the payload
+    assert_string_equal(dummy_cert, (char *)&buffer[5]);
+}
+2. Test receive_ack()
+
+void test_receive_ack()
+{
+    uint8_t buffer[5] = {ACK, 0, 0, 0, 0}; // Mock an ACK message
+    int ret;
+
+    // Mock the SSL read operation
+    mbedtls_ssl_set_bio(&mock_ssl, buffer, sizeof(buffer));
+
+    // Call the function
+    ret = receive_ack(&mock_ssl);
+
+    // Verify return value
+    assert_int_equal(0, ret);
+}
+7. Expand Your Tests
+Write similar tests for:
+
+Timeouts: Mock delayed responses to verify timeout handling.
+Retries: Simulate failures and ensure the retry logic works.
+Edge Cases:
+Empty buffers.
+Large payloads.
+Corrupted messages.
+8. Debugging Failing Tests
+If a test fails, Seatest will report which assertion failed, e.g.:
+Running test: test_send_cert_req
+Assertion failed: expected 0 but got 1 (line 24)
+FAIL
+Fix the implementation or refine the test case to handle the edge case appropriately.
+9. Automating Tests
+Automate running tests with a simple script:
+
+#!/bin/bash
+gcc -o test_protocol test_protocol.c protocol.c -I. -lmbedtls
+if ./test_protocol; then
+    echo "All tests passed!"
+else
+    echo "Some tests failed. Check the logs."
+fi
+Key Concepts Recap
+Seatest Basics:
+Use assert_* macros to verify expected behavior.
+Group tests into suites and call them in main().
+Mocking:
+Mock dependencies (e.g., mbedtls_ssl_context) to isolate the function being tested.
+Iterative Testing:
+Start with small, simple test cases.
+Gradually add tests for edge cases and failure scenarios.
+Would you like help writing tests for specific protocol functions or automating the process further?
+
+
+
+
+
+
+You said:
+Help me automate everything please with explanations
+ChatGPT said:
+
+ChatGPT
+Automating your unit testing workflow ensures consistency and efficiency in verifying your code's functionality. Here's how to set up a fully automated workflow, step by step.
+
+Automation Overview
+The goal is to:
+
+Compile your program and unit tests.
+Run the tests.
+Report the results (success/failure) with details.
+Clean up intermediate files (optional).
+1. Directory Structure
+Organize your project for clarity:
+
+/project
+├── /src               # Your source code
+│   ├── protocol.c
+│   ├── protocol.h
+├── /tests             # Your test files
+│   ├── test_protocol.c
+│   ├── seatest.h      # Seatest framework header
+├── Makefile           # Build automation
+└── run_tests.sh       # Test automation script
+2. Automating Compilation (Makefile)
+A Makefile simplifies building your program and tests. Create a Makefile in your project root:
+
+Makefile
+
+# Compiler and flags
+CC = gcc
+CFLAGS = -Wall -Wextra -I./src -I./tests
+LDFLAGS = -lmbedtls
+
+# Directories
+SRC_DIR = src
+TEST_DIR = tests
+BUILD_DIR = build
+
+# Targets
+TARGET = $(BUILD_DIR)/protocol
+TEST_TARGET = $(BUILD_DIR)/test_protocol
+
+# Source files
+SRC_FILES = $(SRC_DIR)/protocol.c
+TEST_FILES = $(TEST_DIR)/test_protocol.c
+
+# Build the program
+$(TARGET): $(SRC_FILES)
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Build and link the tests
+$(TEST_TARGET): $(SRC_FILES) $(TEST_FILES)
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Run tests
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+# Clean up
+clean:
+	rm -rf $(BUILD_DIR)
+Explanation
+
+Variables:
+CC: Compiler (gcc).
+CFLAGS: Compilation flags (-Wall, -Wextra for warnings, -I for include directories).
+LDFLAGS: Linker flags (e.g., -lmbedtls for the mbedtls library).
+Targets:
+$(TARGET): Builds the main program.
+$(TEST_TARGET): Builds the test program by linking your code and the test cases.
+test: Compiles and runs the tests.
+clean: Deletes all compiled files and intermediate artifacts.
+Directories:
+BUILD_DIR: A directory to store compiled binaries (avoids clutter in the project root).
+3. Automating Test Execution (Shell Script)
+Create a script run_tests.sh to:
+
+Compile your program and tests.
+Run the tests.
+Report the results.
+run_tests.sh
+
+#!/bin/bash
+
+# Set paths
+MAKEFILE=Makefile
+LOG_FILE=test_results.log
+
+# Clear the log file
+> $LOG_FILE
+
+# Step 1: Compile the tests
+echo "Compiling tests..."
+make -f $MAKEFILE test >> $LOG_FILE 2>&1
+if [ $? -ne 0 ]; then
+    echo "Compilation failed. Check $LOG_FILE for details."
+    exit 1
+fi
+echo "Compilation successful."
+
+# Step 2: Run the tests
+echo "Running tests..."
+./build/test_protocol >> $LOG_FILE 2>&1
+TEST_EXIT_CODE=$?
+
+# Step 3: Check results
+if [ $TEST_EXIT_CODE -eq 0 ]; then
+    echo "All tests passed successfully!"
+    echo "See $LOG_FILE for details."
+else
+    echo "Some tests failed. Check $LOG_FILE for details."
+fi
+
+# Optional: Clean up build artifacts
+echo "Cleaning up..."
+make -f $MAKEFILE clean >> $LOG_FILE 2>&1
+Explanation
+
+Compiling Tests:
+Runs make test to compile the tests using the Makefile.
+Logs all output (stdout and stderr) to test_results.log.
+Running Tests:
+Executes the compiled test binary (build/test_protocol).
+Captures the test binary's exit code:
+0: All tests passed.
+Non-zero: At least one test failed.
+Cleaning Up:
+Runs make clean to remove build artifacts.
+4. Running the Workflow
+Make the script executable:
+chmod +x run_tests.sh
+Run the script:
+./run_tests.sh
+Analyze the results:
+If successful:
+Compilation successful.
+Running tests...
+All tests passed successfully!
+See test_results.log for details.
+If there’s a failure:
+Compilation successful.
+Running tests...
+Some tests failed. Check test_results.log for details.
+5. Integrating with CI/CD
+If you're using a CI/CD system (e.g., GitHub Actions, GitLab CI, Jenkins), you can integrate this workflow for automated testing after every code push.
+
+Example: GitHub Actions
+
+Create a .github/workflows/test.yml file:
+
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: sudo apt-get install -y libmbedtls-dev
+
+      - name: Run tests
+        run: ./run_tests.sh
+6. Summary of the Workflow
+Compile:
+Use the Makefile to compile the main program and tests.
+Test:
+Run the Seatest-based unit tests.
+Log:
+Record results in test_results.log.
+Clean Up:
+Remove compiled artifacts to keep the workspace clean.
+Automate:
+Use a CI/CD pipeline for continuous integration.
+Would you like assistance with setting up specific test cases or integrating this workflow into your development process?
